@@ -1,0 +1,65 @@
+@mode(host.dual)
+
+# cal's date arithmetic on the proleptic Gregorian calendar, built on
+# core.datetime. Days are counted the way util-linux cal counts them:
+# weekdays from Sunday = 0, days of the year from 1, and a day number may
+# run past either end of its month (day 0 is the last day of the previous
+# month), which the week-number rules rely on.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+
+from core.datetime import (Date, monthLength, leapYear);
+from core.string_utils import (padLeft);
+
+pub const SUNDAY: int = 0;
+pub const MONDAY: int = 1;
+pub const WEDNESDAY: int = 3;
+pub const FRIDAY: int = 5;
+pub const DECEMBER: int = 12;
+
+# The remainder of a / b in 0..b-1. Loup's % keeps the sign of `a`.
+pub func modulo(a: int, b: int): int {
+    return ((a % b) + b) % b;
+}
+
+# The weekday of `day` in `month` of `year`, Sunday = 0 .. Saturday = 6.
+# core.datetime counts from Monday = 0, so its answer for the 1st is moved
+# by one; days before the 1st or after the month's end count on from it.
+pub func weekday_of(day: int, month: int, year: int): int {
+    let first = Date.new(year, month, 1).weekday();
+    return modulo(first + 1 + day - 1, 7);
+}
+
+# The number of `day` in its year, 1 for January 1; util-linux's
+# day_in_year, so a day outside the month counts on as well.
+pub func day_of_year(day: int, month: int, year: int): int {
+    var total = day;
+    for (var m = 1; m < month; m += 1) {
+        total += monthLength(year, m);
+    }
+    return total;
+}
+
+pub func days_in_year(year: int): int {
+    return if (leapYear(year)) { 366 } else { 365 };
+}
+
+# The year as C's "%04d" prints it: at least four characters, zeros after
+# a minus sign (year -3, which -3 can reach from year 1, is "-003").
+pub func format_year(year: int): string {
+    # One padLeft call on one path: with an early `return "-" + padLeft(...)`
+    # as well, the native build crashed here (Loup 1.26.0).
+    let sign = if (year < 0) { "-" } else { "" };
+    let magnitude = if (year < 0) { 0 - year } else { year };
+    return sign + padLeft(str(magnitude), 4 - sign.len(), "0");
+}
+
+# The month `delta` months after (year, month), as (year, month). A plain
+# count of months since year 0 makes this exact in both directions, across
+# any number of years, and below year 1.
+pub func shift_month(year: int, month: int, delta: int): (int, int) {
+    let index = year * 12 + (month - 1) + delta;
+    let shifted_year = index // 12;
+    return (shifted_year, index - shifted_year * 12 + 1);
+}

@@ -1,25 +1,36 @@
 @mode(host.dual)
 
-# Exit statuses of the whole command line. These tests print the program's
-# normal output and error messages.
+# Exit statuses of whole cal command lines (cli.app.run): help, version,
+# calendars, and the failures util-linux reports with status 1. These tests
+# print the program's normal output and error messages.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+# run() asks the shell whether standard output is a terminal; under the
+# test runner it is not, so nothing is highlighted.
 
 from debug.assert import (expectEq);
-from appinfo import (EXIT_OK, EXIT_USAGE);
+from appinfo import (EXIT_OK, EXIT_FAILURE);
 from cli.app import (run);
 
-func test_version_succeeds(): void {
-    expectEq(run(["--version"]), EXIT_OK, "--version");
+func test_help_and_version_succeed(): void {
+    expectEq(run(["--help"]), EXIT_OK, "--help");
+    expectEq(run(["-V"]), EXIT_OK, "-V");
 }
 
-func test_hello_succeeds(): void {
-    expectEq(run(["hello", "tests"]), EXIT_OK, "hello NAME");
+func test_calendars_succeed(): void {
+    expectEq(run(["2", "2026"]), EXIT_OK, "a month");
+    expectEq(run(["-3wm", "1", "2021"]), EXIT_OK, "three months with ISO weeks");
 }
 
-func test_unknown_command_is_usage_error(): void {
-    expectEq(run(["bogus"]), EXIT_USAGE, "unknown command");
+func test_usage_errors_fail_with_one(): void {
+    expectEq(run(["-q"]), EXIT_FAILURE, "unknown option");
+    expectEq(run(["-y", "-Y"]), EXIT_FAILURE, "exclusive options");
+    expectEq(run(["--reform=julian"]), EXIT_FAILURE, "the Julian calendar");
 }
 
-func test_missing_command_is_usage_error(): void {
-    let none: list[string] = [];
-    expectEq(run(none), EXIT_USAGE, "no command");
+func test_operand_errors_fail_with_one(): void {
+    expectEq(run(["13", "2026"]), EXIT_FAILURE, "month 13");
+    expectEq(run(["1", "2", "3", "4"]), EXIT_FAILURE, "four operands");
 }

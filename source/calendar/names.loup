@@ -1,0 +1,54 @@
+@mode(host.dual)
+
+# cal's month and weekday names. util-linux takes them from the locale; this
+# cal speaks English, as the C locale does.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+
+func month_names(): list[string] {
+    return [
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    ];
+}
+
+# Abbreviations, Sunday first, as C's ABDAY_1..ABDAY_7.
+func weekday_abbreviations(): list[string] {
+    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+}
+
+# The full name of month 1-12.
+pub func month_name(month: int): string {
+    return month_names()[month - 1];
+}
+
+# The month a name stands for: the full English name or its first three
+# letters, in any case ("feb", "FEBRUARY"); None for anything else.
+# util-linux compares whole names too, never other prefixes.
+pub func month_from_name(name: string): int? {
+    let wanted = name.toLowerCase();
+    let names = month_names();
+    for (var k = 0; k < names.len(); k += 1) {
+        let full = names[k].toLowerCase();
+        if (wanted == full or wanted == full.slice(0, 3)) {
+            return Some(k + 1);
+        }
+    }
+    return None;
+}
+
+# The name of `weekday` (Sunday = 0) cut to `width` characters: "Su" for the
+# usual two-character columns, "Sun" for -j's three.
+pub func weekday_label(weekday: int, width: int): string {
+    let name = weekday_abbreviations()[weekday % 7];
+    return name.slice(0, width);
+}
+
+# The line of weekday labels over a month's columns: seven labels of
+# `width` characters starting with `first_day` (Sunday = 0, Monday = 1),
+# separated by single spaces.
+pub func weekday_headings(first_day: int, width: int): string {
+    let labels: list[string] = [weekday_label(first_day + k, width) for k in 0..7];
+    return labels.join(" ");
+}

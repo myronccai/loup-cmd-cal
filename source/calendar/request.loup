@@ -1,0 +1,306 @@
+@mode(host.dual)
+
+# What the operands ask cal for: which year and month, which day to
+# highlight, and whether a lone year means the whole year. This is the
+# operand half of util-linux cal's main(); "today" comes in as a parameter,
+# so every rule can be tested with a pinned date.
+#
+#   cal                    this month, today highlighted
+#   cal 2026               the whole year (-y), unless -n/-3/-Y say otherwise
+#   cal 2 2026             February 2026 (also `cal feb 2026`)
+#   cal 15 2 2026          February 2026 with the 15th highlighted
+#   cal 2026-02-15         a timestamp: that date's month, the date highlighted
+#   cal february           February of this year
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+#
+# Structure: Request; parse_timestamp and its helpers; resolve_request.
+
+from core.datetime import (Date, monthLength);
+from core.string_utils import (isDigits);
+from calendar.days import (day_of_year);
+from calendar.names import (month_from_name);
+from calendar.weeks import (month_of_week);
+from cli.args import (try_help_line);
+from cli.numbers import (parse_number, number_message, NUMBER_OK, INT32_MIN, INT32_MAX);
+
+pub class Request {
+    pub let year: int;
+    pub let month: int;
+    # The day of the year to highlight, 0 for none.
+    pub let mark_yday: int;
+    # A lone year operand without -n, -3 or -Y: show the year, as -y.
+    pub let whole_year: bool;
+
+    new(year: int, month: int, mark_yday: int, whole_year: bool) {
+        this.year = year;
+        this.month = month;
+        this.mark_yday = mark_yday;
+        this.whole_year = whole_year;
+    }
+}
+
+# Whether `text` is HH:MM or HH:MM:SS with a valid time of day.
+func is_time_of_day(text: string): bool {
+    let fields = text.split(":");
+    if (fields.len() < 2 or fields.len() > 3) {
+        return false;
+    }
+    # Hours, minutes and seconds (60 for a leap second, as strptime allows).
+    let limits = [23, 59, 60];
+    for (var k = 0; k < fields.len(); k += 1) {
+        if (fields[k].len() != 2 or !isDigits(fields[k]) or fields[k].toInt() > limits[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+# A count of days in `text` such as "5days", "2 weeks" or "1d", or None.
+# Only whole days and weeks: cal shows dates, and its "now" has no time of
+# day (see the module header of commands/cal.loup).
+func relative_days(text: string): int? {
+    var k = 0;
+    let chars = text.chars();
+    while (k < chars.len() and "0123456789".index_of(chars[k]) >= 0) {
+        k += 1;
+    }
+    if (k == 0) {
+        return None;
+    }
+    let count = text.slice(0, k).toInt();
+    let unit = text.slice(k).trim();
+    let day_units = ["d", "day", "days"];
+    let week_units = ["w", "week", "weeks"];
+    if (day_units.contains(unit)) {
+        return Some(count);
+    }
+    if (week_units.contains(unit)) {
+        return Some(count * 7);
+    }
+    return None;
+}
+
+# The date a timestamp operand names, or None when it is not one. The
+# forms are those of util-linux's parse_timestamp that name a date in UTC:
+# `now`, `today`, `yesterday`, `tomorrow`, `@SECONDS`, `+N UNIT`,
+# `-N UNIT` and `N UNIT ago` (days or weeks), `YYYY-MM-DD` optionally
+# followed by ` HH:MM[:SS]` or `THH:MM:SS`, and `HH:MM[:SS]` (today).
+pub func parse_timestamp(text: string, today: Date): Date? {
+    if (text == "now" or text == "today") {
+        return Some(today);
+    }
+    if (text == "yesterday") {
+        return Some(today.addDays(-1));
+    }
+    if (text == "tomorrow") {
+        return Some(today.addDays(1));
+    }
+    if (text.startsWith("@")) {
+        let (seconds, status) = parse_number(text.slice(1), -100000000000000, 100000000000000);
+        if (status != NUMBER_OK) {
+            return None;
+        }
+        return Some(Date.fromTimestamp(seconds as float));
+    }
+    if (text.startsWith("+") or text.startsWith("-")) {
+        let sign = if (text.startsWith("-")) { -1 } else { 1 };
+        match relative_days(text.slice(1)) {
+            Some(days) => {
+                return Some(today.addDays(sign * days));
+            },
+            None => {
+                return None;
+            },
+        }
+    }
+    if (text.endsWith(" ago")) {
+        match relative_days(text.slice(0, text.len() - 4)) {
+            Some(days) => {
+                return Some(today.addDays(0 - days));
+            },
+            None => {
+                return None;
+            },
+        }
+    }
+    if (is_time_of_day(text)) {
+        return Some(today);
+    }
+    # A date, then perhaps a time after a space or a T.
+    # util-linux takes HH:MM or HH:MM:SS after a space, only HH:MM:SS
+    # after a T.
+    var date_part = text;
+    let space = text.index_of(" ");
+    let tee = text.index_of("T");
+    if (space >= 0) {
+        if (!is_time_of_day(text.slice(space + 1))) {
+            return None;
+        }
+        date_part = text.slice(0, space);
+    } else if (tee >= 0) {
+        let time = text.slice(tee + 1);
+        if (time.split(":").len() != 3 or !is_time_of_day(time)) {
+            return None;
+        }
+        date_part = text.slice(0, tee);
+    }
+    return calendar_date(date_part);
+}
+
+# A date written YYYY-M-D, the month and day with one or two digits. A day
+# past the end of its month (up to 31) runs on into the next month, as
+# mktime() makes of it for util-linux: 2026-02-30 is March 2.
+func calendar_date(text: string): Date? {
+    let fields = text.split("-");
+    if (fields.len() != 3 or fields[0].len() != 4 or fields[1].len() > 2 or fields[2].len() > 2) {
+        return None;
+    }
+    for (field in fields) {
+        if (!isDigits(field)) {
+            return None;
+        }
+    }
+    let month = fields[1].toInt();
+    let day = fields[2].toInt();
+    if (month < 1 or month > 12 or day < 1 or day > 31) {
+        return None;
+    }
+    return Some(Date.new(fields[0].toInt(), month, 1).addDays(day - 1));
+}
+
+# Reads a number operand; Err holds util-linux's message.
+func operand_number(text: string, what: string): Result[int, string] {
+    let (value, status) = parse_number(text, INT32_MIN, INT32_MAX);
+    if (status != NUMBER_OK) {
+        return Err(number_message(what, text, status));
+    }
+    return Ok(value);
+}
+
+# Works out the request from the operands. `months` is -1/-3/-n's count
+# (0 when none was given); `week` is --week=N (0 for none), counted in ISO
+# weeks when `iso`; `today` is the date that "now" means.
+pub func resolve_request(operands: list[string], months: int, week: int, iso: bool, today: Date): Result[Request, string] {
+    var reference = today;
+    var words = operands;
+    var month = 0;
+
+    # One operand that is not a number: a timestamp, else a month name.
+    if (words.len() == 1 and !isDigits(words[0])) {
+        let word = words[0];
+        match parse_timestamp(word, today) {
+            Some(date) => {
+                reference = date;
+            },
+            None => {
+                month = month_from_name(word) ?? 0;
+                if (month == 0) {
+                    return Err("failed to parse timestamp or unknown month name: " + word);
+                }
+            },
+        }
+        words = [];
+    }
+
+    let count = words.len();
+    if (count > 3) {
+        return Err("bad usage\n" + try_help_line());
+    }
+    var year = reference.year;
+    var mark = 0;
+    var whole_year = false;
+    if (count == 0) {
+        if (week == 0) {
+            mark = reference.ordinal();
+            if (month == 0) {
+                month = reference.month;
+            }
+        }
+    } else {
+        # DAY MONTH YEAR, MONTH YEAR or YEAR: read from the left.
+        var at = 0;
+        var day = 0;
+        if (count == 3) {
+            match operand_number(words[0], "illegal day value") {
+                Ok(n) => {
+                    day = n;
+                },
+                Err(message) => {
+                    return Err(message);
+                },
+            }
+            if (day < 1 or day > 31) {
+                return Err("illegal day value: use 1-31");
+            }
+            at = 1;
+        }
+        if (count >= 2) {
+            let word = words[at];
+            # A word that starts with a digit is a month number, as util-linux
+            # decides with isdigit() on its first character.
+            if (word.len() > 0 and "0123456789".index_of(word.slice(0, 1)) >= 0) {
+                match operand_number(word, "illegal month value: use 1-12") {
+                    Ok(n) => {
+                        month = n;
+                    },
+                    Err(message) => {
+                        return Err(message);
+                    },
+                }
+            } else {
+                month = month_from_name(word) ?? -1;
+                if (month < 0) {
+                    return Err("unknown month name: " + word);
+                }
+            }
+            if (month < 1 or month > 12) {
+                return Err("illegal month value: use 1-12");
+            }
+            at += 1;
+        }
+        match operand_number(words[at], "illegal year value") {
+            Ok(n) => {
+                year = n;
+            },
+            Err(message) => {
+                return Err(message);
+            },
+        }
+        if (year < 1) {
+            return Err("illegal year value: use positive integer");
+        }
+        # util-linux reserves INT32_MAX as its "Julian forever" reform year.
+        if (year == INT32_MAX) {
+            return Err("illegal year value");
+        }
+        if (day > 0) {
+            let last = monthLength(year, month);
+            if (day > last) {
+                return Err("illegal day value: use 1-" + str(last));
+            }
+            mark = day_of_year(day, month, year);
+        } else if (reference.year == year) {
+            mark = reference.ordinal();
+        }
+        if (month == 0 and week == 0) {
+            month = reference.month;
+            whole_year = months == 0;
+        }
+    }
+
+    if (week > 0) {
+        match month_of_week(week, year, iso) {
+            Ok(m) => {
+                if (month == 0) {
+                    month = m;
+                }
+            },
+            Err(message) => {
+                return Err(message);
+            },
+        }
+    }
+    return Ok(Request(year, month, mark, whole_year));
+}

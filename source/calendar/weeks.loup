@@ -1,0 +1,90 @@
+@mode(host.dual)
+
+# Week numbers for cal -w and --week=N, after util-linux cal's week_number
+# and week_to_day. Two numberings exist:
+#
+# - US (weeks start on Sunday): week 1 is the week that holds January 1, so
+#   a year has 53 weeks, or 54 when a leap year starts on Saturday.
+# - ISO 8601 (weeks start on Monday): week 1 is the week that holds the
+#   year's first Thursday; up to three days at either end of the year
+#   belong to the neighbouring year's week (January 1 may be in week 53,
+#   December 31 in week 1).
+#
+# Both reduce to one formula: (day of year + offset) / 7, where the offset
+# depends on the weekday of January 1.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+
+from core.datetime import (monthLength);
+from calendar.days import (weekday_of, day_of_year, days_in_year, DECEMBER, MONDAY, WEDNESDAY, FRIDAY);
+
+# Which week numbers -w shows: none, US or ISO. util-linux picks ISO when
+# weeks start on Monday and US otherwise.
+pub enum Numbering { Off, Us, Iso }
+
+# What `week_number(day, ...) = (day of year + offset) / 7` adds for a
+# year whose January 1 falls on `jan1` (Sunday = 0).
+pub func week_offset(jan1: int, iso: bool): int {
+    if (!iso) {
+        return jan1 + 6;
+    }
+    # A year starting on Friday or Saturday puts its first days in the
+    # previous year's last week; otherwise week 1 already holds them.
+    return if (jan1 >= FRIDAY) { jan1 - 2 } else { jan1 + 5 };
+}
+
+# The week of `day` in `month` of `year`. With -j cal passes a day of the
+# year instead (any number above 31), which counts from January.
+pub func week_number(day: int, month: int, year: int, iso: bool): int {
+    let jan1 = weekday_of(1, 1, year);
+    let offset = week_offset(jan1, iso);
+    let from_month = if (day > 31) { 1 } else { month };
+    let yday = day_of_year(day, from_month, year);
+
+    # ISO only: the days before week 1 are in the last week of last year.
+    if (yday + offset < 7) {
+        return week_number(31, DECEMBER, year - 1, iso);
+    }
+    # ISO only: a Monday to Wednesday at the very end of a year that also
+    # ends Monday to Wednesday is in week 1 of the next year.
+    if (iso and yday >= 363) {
+        let weekday = weekday_of(day, from_month, year);
+        let last = weekday_of(31, DECEMBER, year);
+        if (weekday >= MONDAY and weekday <= WEDNESDAY and last >= MONDAY and last <= WEDNESDAY) {
+            return week_number(1, 1, year + 1, iso);
+        }
+    }
+    return (yday + offset) / 7;
+}
+
+# The day of the year on which week `week` starts (util-linux's
+# week_to_day): a Sunday for US weeks, a Monday for ISO ones, and 1 when
+# the week starts in the previous year.
+pub func week_start(week: int, year: int, iso: bool): int {
+    let yday = week * 7 - week_offset(weekday_of(1, 1, year), iso);
+    if (yday <= 0) {
+        return 1;
+    }
+    return yday;
+}
+
+# The month that `--week=N` shows when no month is given: the month in
+# which the week starts. A week past the end of the year means January for
+# US weeks; for ISO weeks it is only valid as the number of the days that
+# start January (week 53 after a year with 53 weeks).
+pub func month_of_week(week: int, year: int, iso: bool): Result[int, string] {
+    var yday = week_start(week, year, iso);
+    if (yday > days_in_year(year)) {
+        if (iso and week != week_number(31, DECEMBER, year - 1, iso)) {
+            return Err(i"illegal week value: year {$ year $} doesn't have week {$ week $}");
+        }
+        return Ok(1);
+    }
+    var month = 1;
+    while (yday > monthLength(year, month)) {
+        yday -= monthLength(year, month);
+        month += 1;
+    }
+    return Ok(month);
+}

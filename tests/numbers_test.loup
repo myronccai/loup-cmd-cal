@@ -1,0 +1,54 @@
+@mode(host.dual)
+
+# Unit tests for cal's strtol-style number parsing (cli.numbers): signs,
+# blanks, ranges, and the wording of util-linux's messages.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from cli.numbers import (parse_number, number_message, NUMBER_OK, NOT_A_NUMBER, OUT_OF_RANGE, INT32_MIN, INT32_MAX, UINT32_MAX);
+
+func value_of(text: string): int {
+    let (value, status) = parse_number(text, INT32_MIN, INT32_MAX);
+    expectEq(status, NUMBER_OK, text);
+    return value;
+}
+
+func status_of(text: string, lowest: int, highest: int): int {
+    let (_, status) = parse_number(text, lowest, highest);
+    return status;
+}
+
+func test_plain_and_signed_numbers(): void {
+    expectEq(value_of("2026"), 2026, "digits");
+    expectEq(value_of("+7"), 7, "plus sign");
+    expectEq(value_of("-7"), -7, "minus sign");
+    expectEq(value_of("  12"), 12, "leading blanks");
+    expectEq(value_of("007"), 7, "leading zeros");
+}
+
+func test_not_numbers(): void {
+    expectEq(status_of("", INT32_MIN, INT32_MAX), NOT_A_NUMBER, "empty");
+    expectEq(status_of("-", INT32_MIN, INT32_MAX), NOT_A_NUMBER, "a sign alone");
+    expectEq(status_of("12x", INT32_MIN, INT32_MAX), NOT_A_NUMBER, "trailing letter");
+    expectEq(status_of("1 2", INT32_MIN, INT32_MAX), NOT_A_NUMBER, "inner blank");
+    expectEq(status_of("99999999999x", INT32_MIN, INT32_MAX), NOT_A_NUMBER, "long, then a letter");
+}
+
+func test_ranges(): void {
+    expectEq(value_of("2147483647"), INT32_MAX, "int32 maximum");
+    expectEq(value_of("-2147483648"), INT32_MIN, "int32 minimum");
+    expectEq(status_of("2147483648", INT32_MIN, INT32_MAX), OUT_OF_RANGE, "past int32");
+    expectEq(status_of("4294967295", 0, UINT32_MAX), NUMBER_OK, "uint32 maximum");
+    expectEq(status_of("-1", 0, UINT32_MAX), OUT_OF_RANGE, "minus for an unsigned value");
+    expectEq(status_of("123456789012345678901234567890", 0, UINT32_MAX), OUT_OF_RANGE, "very long");
+}
+
+func test_messages(): void {
+    expectEq(number_message("illegal year value", "x", NOT_A_NUMBER), "illegal year value: 'x'", "invalid");
+    expectEq(number_message("illegal year value", "9999999999", OUT_OF_RANGE),
+             "illegal year value: '9999999999': Numerical result out of range", "out of range");
+    expect(number_message("w", "1", NOT_A_NUMBER).startsWith("w: "), "prefix");
+}

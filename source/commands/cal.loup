@@ -1,0 +1,203 @@
+@mode(host.dual)
+
+# cal itself: from the parsed options and the surroundings (today's date,
+# whether standard output is a terminal and how wide it is, whether to
+# highlight) to the lines of the calendar. calendar_lines is a pure
+# function of those inputs; only run_cal looks at the clock and the
+# terminal, and only run_cal prints.
+#
+# Today is Date.today(), which reads the UTC clock: Loup 1.26.0's
+# core.datetime has no local time zone. Between midnight UTC and local
+# midnight the "current" month and highlighted day are UTC's.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+#
+# Structure: Surroundings; months_per_row (how many months fit side by
+# side); first_month; calendar_lines, which lays out the rows; run_cal.
+
+from core.datetime import (Date);
+from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE);
+from cli.args import (Options, Columns);
+from calendar.days import (format_year, shift_month, SUNDAY, MONDAY);
+from calendar.grid import (MonthGrid, fill_month);
+from calendar.layout import (Style, make_style, center, render_row, render_vertical_row);
+from calendar.request import (Request, resolve_request);
+from calendar.terminal import (stdout_is_terminal, terminal_width, colors_enabled);
+from calendar.weeks import (Numbering);
+
+# The outside world as cal sees it.
+pub class Surroundings {
+    pub let today: Date;
+    pub let tty: bool;
+    # The terminal's width; only read when `tty`.
+    pub let width: int;
+    pub let colors: bool;
+
+    new(today: Date, tty: bool, width: int, colors: bool) {
+        this.today = today;
+        this.tty = tty;
+        this.width = width;
+        this.colors = colors;
+    }
+}
+
+# For tests and run_cal: surroundings built here, in their own module.
+pub func surroundings(today: Date, tty: bool, width: int, colors: bool): Surroundings {
+    return Surroundings(today, tty, width, colors);
+}
+
+# How many months of `month_width` columns fit in `width` columns with
+# `gutter` spaces between them (util-linux's formula, at least one).
+pub func months_that_fit(width: int, month_width: int, gutter: int): int {
+    let usable = if (width < month_width) { month_width } else { width };
+    let extra = (usable / month_width - 1) * gutter;
+    return (usable - extra) / month_width;
+}
+
+# Months side by side for `count` months: one month needs no row; -c N
+# gives N; a terminal limits the default three, and -c auto fills it.
+pub func months_per_row(count: int, columns: Columns, tty: bool, width: int, julian: bool, gutter: int): int {
+    if (count <= 1) {
+        return 1;
+    }
+    # util-linux measures months as 20 (27 with -j) columns here, also
+    # with week numbers.
+    let month_width = if (julian) { 27 } else { 20 };
+    match columns {
+        Columns.MaxThree => {
+            if (!tty) {
+                return 3;
+            }
+            # At most three, fewer when the terminal is narrow.
+            let fit = months_that_fit(width, month_width, gutter);
+            return if (fit < 3) { fit } else { 3 };
+        },
+        Columns.Fixed(n) if (n > 0) => {
+            return n;
+        },
+        # `-c 0` is not a count: util-linux keeps three, even on a terminal.
+        Columns.Fixed(_) => {
+            return 3;
+        },
+        Columns.Auto => {
+            if (!tty) {
+                return 3;
+            }
+            return months_that_fit(width, month_width, gutter);
+        },
+    }
+}
+
+# The first month shown: the requested one (January for -y), moved back by
+# half the count with -S or -3 so that the requested month is centred.
+func first_month(year: int, month: int, count: int, span: bool): (int, int) {
+    if (!span) {
+        return (year, month);
+    }
+    return shift_month(year, month, 0 - count / 2);
+}
+
+# The Style of this run. The call above names its arguments, which keeps a
+# list of flags readable; such calls stay within one module, because a
+# call with named arguments into another module crashes the native build
+# of Loup 1.26.0.
+func style_for(julian: bool, monday: bool, numbering: Numbering, gutter: int,
+               year_header: bool, highlight: bool, request: Request, marked_week: int): Style {
+    let first_day = if (monday) { MONDAY } else { SUNDAY };
+    # Without highlighting util-linux forgets the day to mark; the week
+    # numbers stay.
+    let mark_yday = if (highlight) { request.mark_yday } else { 0 };
+    return make_style(julian, first_day, numbering, gutter, year_header, highlight,
+                      request.year, request.month, mark_yday, marked_week);
+}
+
+# The lines cal prints, or the message of an operand error.
+pub func calendar_lines(opts: Options, world: Surroundings): Result[list[string], string] {
+    let numbering = if (!opts.week_numbers) {
+        Numbering.Off
+    } else if (opts.monday) {
+        Numbering.Iso
+    } else {
+        Numbering.Us
+    };
+    let request = match resolve_request(opts.operands, opts.months, opts.week, numbering == Numbering.Iso, world.today) {
+        Ok(r) => r,
+        Err(message) => {
+            return Err(message);
+        },
+    };
+
+    let whole_year = opts.whole_year or request.whole_year;
+    var count = opts.months;
+    var gutter = 2;
+    var month = request.month;
+    if (whole_year or opts.twelve) {
+        gutter = 3;
+        if (count == 0) {
+            count = 12;
+        }
+        if (whole_year) {
+            month = 1;
+        }
+    }
+    if (opts.vertical) {
+        gutter = 1;
+    }
+    let per_row = months_per_row(count, opts.columns, world.tty, world.width, opts.julian, gutter);
+    if (count == 0) {
+        count = 1;
+    }
+
+    let style = style_for(julian = opts.julian, monday = opts.monday, numbering = numbering,
+                          gutter = gutter, year_header = whole_year, highlight = world.colors,
+                          request = request, marked_week = opts.week);
+
+    var lines: list[string] = [];
+    if (whole_year) {
+        let row_width = per_row * style.week_width + (per_row - 1) * gutter;
+        lines.push(center(format_year(request.year), row_width));
+        lines.push("");
+    }
+    let (start_year, start_month) = first_month(request.year, month, count, opts.span);
+    let first_day = style.first_day;
+    for (var first = 0; first < count; first += per_row) {
+        var grids: list[MonthGrid] = [];
+        for (var k = first; k < first + per_row and k < count; k += 1) {
+            let (y, m) = shift_month(start_year, start_month, k);
+            grids.push(fill_month(y, m, first_day, opts.julian, numbering));
+        }
+        if (opts.vertical) {
+            # -v separates rows of months with a blank line.
+            if (first > 0) {
+                lines.push("");
+            }
+            for (line in render_vertical_row(grids, style)) {
+                lines.push(line);
+            }
+        } else {
+            for (line in render_row(grids, style)) {
+                lines.push(line);
+            }
+        }
+    }
+    return Ok(lines);
+}
+
+# Looks at the clock and the terminal, then prints the calendar.
+pub func run_cal(opts: Options): int {
+    let tty = stdout_is_terminal();
+    let width = if (tty) { terminal_width() } else { 0 };
+    let colors = colors_enabled(opts.color, tty, env("TERM") ?? "", env("NO_COLOR").is_some());
+    let world = surroundings(Date.today(), tty, width, colors);
+    match calendar_lines(opts, world) {
+        Ok(lines) => {
+            print(lines.join("\n") + "\n");
+            return EXIT_OK;
+        },
+        Err(message) => {
+            printErr(APP_NAME + ": " + message);
+            return EXIT_FAILURE;
+        },
+    }
+}

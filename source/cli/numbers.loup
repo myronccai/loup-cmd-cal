@@ -1,0 +1,71 @@
+@mode(host.dual)
+
+# cal's number parsing, as util-linux reads option values and operands with
+# strtol: optional leading blanks and sign, then decimal digits and nothing
+# else. The result is a tuple (value, status) so that the caller can word
+# the message itself ("illegal year value", "invalid month argument", ...).
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+# (system.text.parseInt would do part of this but does not link natively.)
+
+# The status half of parse_number's result.
+pub const NUMBER_OK: int = 0;
+pub const NOT_A_NUMBER: int = 1;
+pub const OUT_OF_RANGE: int = 2;
+
+# The ranges of C's int32_t and uint32_t, which util-linux parses into.
+pub const INT32_MIN: int = -2147483648;
+pub const INT32_MAX: int = 2147483647;
+pub const UINT32_MAX: int = 4294967295;
+
+# Reads `text` as a decimal number between `lowest` and `highest`. Returns
+# (value, NUMBER_OK), (0, NOT_A_NUMBER) or (0, OUT_OF_RANGE). A minus sign
+# is out of range when `lowest` is 0, as util-linux's unsigned parsers say.
+pub func parse_number(text: string, lowest: int, highest: int): (int, int) {
+    const DIGITS: string = "0123456789";
+    let chars = text.chars();
+    var i = 0;
+    while (i < chars.len() and (chars[i] == " " or chars[i] == "\t")) {
+        i += 1;
+    }
+    var negative = false;
+    if (i < chars.len() and (chars[i] == "+" or chars[i] == "-")) {
+        negative = chars[i] == "-";
+        i += 1;
+    }
+    if (i == chars.len()) {
+        return (0, NOT_A_NUMBER);
+    }
+    var value = 0;
+    var too_big = false;
+    for (var k = i; k < chars.len(); k += 1) {
+        let digit = DIGITS.index_of(chars[k]);
+        if (digit < 0) {
+            return (0, NOT_A_NUMBER);
+        }
+        # Stop growing once past every range we parse; keep scanning so
+        # that "99999999999x" is still "not a number", as strtol finds.
+        if (!too_big) {
+            value = value * 10 + digit;
+            too_big = value > UINT32_MAX;
+        }
+    }
+    if (negative) {
+        value = 0 - value;
+    }
+    if (too_big or value < lowest or value > highest or (negative and lowest == 0 and value != 0)) {
+        return (0, OUT_OF_RANGE);
+    }
+    return (value, NUMBER_OK);
+}
+
+# util-linux's message for a value that parse_number refused: `WHAT: 'TEXT'`,
+# with strerror's words added when the number is out of range.
+pub func number_message(what: string, text: string, status: int): string {
+    let quoted = what + ": '" + text + "'";
+    if (status == OUT_OF_RANGE) {
+        return quoted + ": Numerical result out of range";
+    }
+    return quoted;
+}

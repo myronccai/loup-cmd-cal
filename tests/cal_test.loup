@@ -1,0 +1,101 @@
+@mode(host.dual)
+
+# Unit tests for whole cal runs (commands.cal): which months appear in
+# which order, the -y header, rows of months, terminal widths and the
+# highlight, all from calendar_lines with pinned surroundings (today is
+# October 21, 2026).
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from core.datetime import (Date);
+from cli.args import (Columns, parse_args);
+from commands.cal import (Surroundings, surroundings, calendar_lines, months_per_row, months_that_fit);
+
+func file_output(): Surroundings {
+    return surroundings(Date.new(2026, 10, 21), false, 0, false);
+}
+
+func lines_for(argv: list[string], world: Surroundings): list[string] {
+    return calendar_lines(parse_args(argv).unwrap(), world).unwrap();
+}
+
+func test_one_month(): void {
+    let lines = lines_for(["2", "2026"], file_output());
+    expectEq(lines.len(), 8, "one month");
+    expectEq(lines[0], "    February 2026   ", "February 2026");
+    expectEq(lines[2], " 1  2  3  4  5  6  7", "a month starting on Sunday");
+}
+
+func test_current_month_by_default(): void {
+    let none: list[string] = [];
+    let lines = lines_for(none, file_output());
+    expectEq(lines[0], "    October 2026    ", "today's month");
+    expect(!lines[5].contains("\u{1B}"), "no highlight in a file");
+}
+
+func test_three_months_span_the_new_year(): void {
+    let lines = lines_for(["-3", "1", "2026"], file_output());
+    expectEq(lines[0], "    December 2025         January 2026          February 2026   ", "December to February");
+}
+
+func test_span_centres_the_month(): void {
+    let lines = lines_for(["-S", "-n", "5", "6", "2026"], file_output());
+    expectEq(lines.len(), 16, "two rows");
+    expect(lines[0].startsWith("     April 2026     "), "starts two months before June");
+    expect(lines[8].startsWith("      July 2026"), "the second row");
+}
+
+func test_year_header(): void {
+    let lines = lines_for(["-y", "2026"], file_output());
+    expectEq(lines.len(), 2 + 4 * 8, "year line, blank line, four rows");
+    expectEq(lines[0].trim(), "2026", "the year");
+    expectEq(lines[0].len(), 66, "centred over three months and two gutters");
+    expectEq(lines[1], "", "a blank line");
+    expectEq(lines[2], "       January               February                 March       ", "months without years");
+}
+
+func test_lone_year_is_the_whole_year(): void {
+    expectEq(lines_for(["2026"], file_output()).len(), 34, "as -y");
+    expectEq(lines_for(["-1", "2026"], file_output())[0], "    October 2026    ", "-1: the current month's number");
+}
+
+func test_twelve_months_from_a_month(): void {
+    let lines = lines_for(["-Y", "11", "2026"], file_output());
+    expectEq(lines.len(), 32, "four rows, no year line");
+    expect(lines[0].startsWith("    November 2026"), "starts with November");
+    expect(lines[24].contains("August 2027"), "ends in 2027");
+}
+
+func test_columns(): void {
+    let lines = lines_for(["-c", "1", "-n", "2", "1", "2026"], file_output());
+    expectEq(lines.len(), 16, "one month per row");
+    expectEq(lines[8], "    February 2026   ", "the second month below");
+}
+
+func test_months_per_row(): void {
+    expectEq(months_per_row(1, Columns.Fixed(4), false, 0, false, 2), 1, "a single month");
+    expectEq(months_per_row(12, Columns.MaxThree, false, 0, false, 3), 3, "a file: three");
+    expectEq(months_per_row(12, Columns.MaxThree, true, 45, false, 3), 2, "a narrow terminal");
+    expectEq(months_per_row(12, Columns.MaxThree, true, 200, false, 3), 3, "at most three");
+    expectEq(months_per_row(12, Columns.Auto, true, 200, false, 3), 8, "-c auto fills the terminal");
+    expectEq(months_per_row(12, Columns.Fixed(0), true, 45, false, 3), 3, "-c 0");
+    expectEq(months_per_row(12, Columns.Fixed(5), false, 0, false, 3), 5, "-c 5");
+    expectEq(months_that_fit(10, 20, 2), 1, "always one");
+    expectEq(months_that_fit(66, 20, 3), 3, "three with -y gutters");
+    expectEq(months_that_fit(65, 20, 3), 2, "one column short");
+}
+
+func test_highlight_today_on_a_terminal(): void {
+    let world = surroundings(Date.new(2026, 10, 21), true, 80, true);
+    let none: list[string] = [];
+    let lines = lines_for(none, world);
+    expectEq(lines[5], "18 19 20 \u{1B}[7m21\u{1B}[0m 22 23 24", "October 21 in reverse video");
+}
+
+func test_operand_errors_come_back(): void {
+    let opts = parse_args(["13", "2026"]).unwrap();
+    expectEq(calendar_lines(opts, file_output()).unwrap_err(), "illegal month value: use 1-12", "month 13");
+}

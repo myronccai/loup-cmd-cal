@@ -1,0 +1,129 @@
+@mode(host.dual)
+
+# Unit tests for reading cal's operands (calendar.request): years, months,
+# dates, month names, timestamps and --week, each with a pinned "today"
+# (Wednesday, October 21, 2026, day 294 of the year), and util-linux's
+# messages for bad operands.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from core.datetime import (Date);
+from calendar.request import (Request, resolve_request, parse_timestamp);
+
+func today(): Date {
+    return Date.new(2026, 10, 21);
+}
+
+func request(operands: list[string]): Request {
+    return resolve_request(operands, 0, 0, false, today()).unwrap();
+}
+
+func problem(operands: list[string]): string {
+    return resolve_request(operands, 0, 0, false, today()).unwrap_err();
+}
+
+func iso(text: string): string {
+    return match parse_timestamp(text, today()) {
+        Some(date) => date.isoformat(),
+        None => "none",
+    };
+}
+
+func test_no_operands_means_this_month(): void {
+    let none: list[string] = [];
+    let r = request(none);
+    expect(r.year == 2026 and r.month == 10, "October 2026");
+    expectEq(r.mark_yday, 294, "today is marked");
+    expect(!r.whole_year, "one month");
+}
+
+func test_a_year_means_the_whole_year(): void {
+    let r = request(["2027"]);
+    expect(r.whole_year, "the whole year");
+    expectEq(r.year, 2027, "year");
+    expectEq(r.mark_yday, 0, "today is in another year");
+    expectEq(request(["2026"]).mark_yday, 294, "this year marks today");
+    let counted = resolve_request(["2027"], 3, 0, false, today()).unwrap();
+    expect(!counted.whole_year, "-n/-3 keep a count of months");
+    expectEq(counted.month, 10, "starting at the current month's number");
+}
+
+func test_month_and_year(): void {
+    let r = request(["2", "2024"]);
+    expect(r.year == 2024 and r.month == 2, "February 2024");
+    expectEq(request(["feb", "2024"]).month, 2, "a month name");
+    expectEq(request(["December", "2024"]).month, 12, "a full name");
+}
+
+func test_day_month_year_marks_the_day(): void {
+    let r = request(["15", "2", "2026"]);
+    expectEq(r.month, 2, "February");
+    expectEq(r.mark_yday, 46, "February 15 is day 46");
+    expectEq(request(["29", "2", "2024"]).mark_yday, 60, "a leap day");
+}
+
+func test_month_name_alone_is_this_year(): void {
+    let r = request(["march"]);
+    expect(r.year == 2026 and r.month == 3, "March 2026");
+    expectEq(r.mark_yday, 294, "today stays marked");
+}
+
+func test_timestamps_move_today(): void {
+    let r = request(["2024-02-10"]);
+    expect(r.year == 2024 and r.month == 2, "February 2024");
+    expectEq(r.mark_yday, 41, "the timestamp's day is marked");
+    expectEq(request(["@0"]).month, 1, "the epoch");
+}
+
+func test_timestamp_forms(): void {
+    expectEq(iso("now"), "2026-10-21", "now");
+    expectEq(iso("yesterday"), "2026-10-20", "yesterday");
+    expectEq(iso("tomorrow"), "2026-10-22", "tomorrow");
+    expectEq(iso("@86400"), "1970-01-02", "seconds");
+    expectEq(iso("@-1"), "1969-12-31", "before the epoch");
+    expectEq(iso("+3days"), "2026-10-24", "+3days");
+    expectEq(iso("-2 weeks"), "2026-10-07", "-2 weeks");
+    expectEq(iso("10 days ago"), "2026-10-11", "ago");
+    expectEq(iso("2026-2-5"), "2026-02-05", "one-digit fields");
+    expectEq(iso("2026-02-30"), "2026-03-02", "a day past the month runs on");
+    expectEq(iso("2026-02-15 10:20"), "2026-02-15", "date and time");
+    expectEq(iso("2026-02-15T10:20:30"), "2026-02-15", "ISO 8601 with T");
+    expectEq(iso("13:45"), "2026-10-21", "a time is today");
+}
+
+func test_not_timestamps(): void {
+    expectEq(iso("2026-02-15T10:20"), "none", "T needs seconds");
+    expectEq(iso("2026-13-01"), "none", "month 13");
+    expectEq(iso("2026-02-32"), "none", "day 32");
+    expectEq(iso("2026-02-15 25:00"), "none", "hour 25");
+    expectEq(iso("+3 hours"), "none", "hours");
+    expectEq(iso("feb"), "none", "a month name");
+}
+
+func test_operand_messages(): void {
+    expectEq(problem(["32", "1", "2026"]), "illegal day value: use 1-31", "day 32");
+    expectEq(problem(["30", "2", "2024"]), "illegal day value: use 1-29", "February 30");
+    expectEq(problem(["x", "1", "2026"]), "illegal day value: 'x'", "day x");
+    expectEq(problem(["13", "2026"]), "illegal month value: use 1-12", "month 13");
+    expectEq(problem(["1x", "2026"]), "illegal month value: use 1-12: '1x'", "month 1x");
+    expectEq(problem(["foo", "2026"]), "unknown month name: foo", "month foo");
+    expectEq(problem(["0"]), "illegal year value: use positive integer", "year 0");
+    expectEq(problem(["2147483647"]), "illegal year value", "the reserved year");
+    expectEq(problem(["2", "x"]), "illegal year value: 'x'", "year x");
+    expectEq(problem(["2026x"]), "failed to parse timestamp or unknown month name: 2026x", "neither");
+    expectEq(problem(["1", "2", "3", "4"]), "bad usage\nTry 'cal --help' for more information.", "four operands");
+}
+
+func test_week_chooses_the_month(): void {
+    let r = resolve_request(["2026"], 0, 10, false, today()).unwrap();
+    expectEq(r.month, 3, "US week 10 of 2026 starts in March");
+    expect(!r.whole_year, "--week shows a month");
+    let given = resolve_request(["5", "2026"], 0, 10, false, today()).unwrap();
+    expectEq(given.month, 5, "a given month wins");
+    let none: list[string] = [];
+    expectEq(resolve_request(none, 0, 20, true, today()).unwrap().mark_yday, 0, "no mark with --week alone");
+    expectEq(resolve_request(["2026"], 0, 54, true, today()).unwrap_err(), "illegal week value: year 2026 doesn't have week 54", "no ISO week 54");
+}

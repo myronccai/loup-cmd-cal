@@ -1,45 +1,275 @@
 @mode(host.dual)
 
-# Command-line parsing. Loup 1.26 has no CLI library, so arguments are
-# parsed by hand into an Options value.
+# Command-line parsing for cal, following GNU getopt_long as util-linux cal
+# calls it with the short options "13mjn:sSywYvc:Vh":
 #
-# Grammar: [OPTIONS] COMMAND [OPERANDS...]
-#   Options may appear anywhere before `--`; everything after `--` is an
-#   operand. Value options accept `--name VALUE` and `--name=VALUE`.
+# - options and operands may be mixed (getopt moves the operands to the
+#   end); `--` ends the options and `-` alone is an operand;
+# - short options cluster (`-3mj`), and -n and -c take the rest of their
+#   word or the next argument (`-n6`, `-c 2`);
+# - long options take `--name=VALUE` or `--name VALUE`, except --week and
+#   --color, whose value is optional and so only comes after `=`; any
+#   unambiguous prefix names an option (`--mond`);
+# - each option is acted on as it is read, so the first error wins and
+#   --help or --version before an error still prints the help or version.
+#
+# Operands are only collected here; calendar.request reads them, because
+# their meaning depends on today's date.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+#
+# Structure: Columns, Options and ArgError; the option tables; apply(),
+# which acts on one option; then parse_args, which splits each argument
+# into options and their values.
 
-pub const DEFAULT_GREETING: string = "Hello";
+from appinfo import (APP_NAME);
+from calendar.terminal import (ColorMode);
+from core.string_utils import (isDigits);
+from cli.numbers import (parse_number, number_message, NUMBER_OK, NOT_A_NUMBER, OUT_OF_RANGE, INT32_MIN, INT32_MAX, UINT32_MAX);
 
-pub struct Options {
-    pub command: string;
-    pub operands: list[string];
-    pub help: bool;
-    pub version: bool;
-    pub verbose: bool;
-    pub shout: bool;
-    pub greeting: string;
+# -c: how many months go side by side. MaxThree is the default: three, or
+# fewer on a narrow terminal; Auto fills the terminal; Fixed(n) is `-c n`.
+pub enum Columns { MaxThree, Auto, Fixed(int) }
+
+# The parsed command line. A class, not a struct: it crosses module
+# boundaries, and native builds corrupt struct values that do so when
+# another type shares field names.
+pub class Options {
+    pub var help: bool = false;
+    pub var version: bool = false;
+    # -1, -3 or -n N; 0 when none was given.
+    pub var months: int = 0;
+    pub var span: bool = false;
+    pub var monday: bool = false;
+    pub var julian: bool = false;
+    pub var whole_year: bool = false;
+    pub var twelve: bool = false;
+    pub var week_numbers: bool = false;
+    # --week=N, 0 when no week was asked for.
+    pub var week: int = 0;
+    pub var vertical: bool = false;
+    pub var columns: Columns = Columns.MaxThree;
+    pub var color: ColorMode = ColorMode.Default;
+    pub var operands: list[string] = [];
 }
 
-pub func parse_args(argv: list[string]): Result[Options, string] {
-    var command = "";
+# A command-line error: the message without the `cal: ` prefix, and whether
+# getopt's `Try 'cal --help'` line follows it.
+pub class ArgError {
+    pub let message: string;
+    pub let try_help: bool;
+
+    new(message: string, try_help: bool) {
+        this.message = message;
+        this.try_help = try_help;
+    }
+}
+
+# Short options without a value, and the two that take one.
+const SHORT_FLAGS: string = "13mjsSywYvVh";
+const SHORT_WITH_VALUE: string = "nc";
+
+# Value kinds in the long option table.
+const NO_VALUE: int = 0;
+const NEEDS_VALUE: int = 1;
+const MAY_HAVE_VALUE: int = 2;
+
+# The long options in util-linux's order (which is the order getopt lists
+# ambiguous candidates in), each with the key apply() acts on and its value
+# kind.
+func long_options(): list[(string, string, int)] {
+    return [
+        ("one", "1", NO_VALUE), ("three", "3", NO_VALUE), ("sunday", "s", NO_VALUE),
+        ("monday", "m", NO_VALUE), ("julian", "j", NO_VALUE), ("months", "n", NEEDS_VALUE),
+        ("span", "S", NO_VALUE), ("year", "y", NO_VALUE), ("week", "w", MAY_HAVE_VALUE),
+        ("color", "color", MAY_HAVE_VALUE), ("reform", "reform", NEEDS_VALUE),
+        ("iso", "iso", NO_VALUE), ("version", "V", NO_VALUE), ("twelve", "Y", NO_VALUE),
+        ("help", "h", NO_VALUE), ("vertical", "v", NO_VALUE), ("columns", "c", NEEDS_VALUE),
+    ];
+}
+
+func quote(text: string): string {
+    return "'" + text + "'";
+}
+
+func usage_error(message: string): ArgError {
+    return ArgError(message, true);
+}
+
+func plain_error(message: string): ArgError {
+    return ArgError(message, false);
+}
+
+# The indexes in long_options() that `name` selects: the exact match if
+# there is one, otherwise every option it is a prefix of.
+pub func find_long(name: string): list[int] {
+    let table = long_options();
+    var found: list[int] = [];
+    for (var k = 0; k < table.len(); k += 1) {
+        let candidate = table[k].0;
+        if (candidate == name) {
+            return [k];
+        }
+        if (name.len() > 0 and candidate.startsWith(name)) {
+            found.push(k);
+        }
+    }
+    return found;
+}
+
+# -y, -Y and -n exclude each other (util-linux's err_exclusive_options):
+# the first one seen claims the group, and any other one is an error.
+func check_exclusive(key: string, claimed: string): Option[ArgError] {
+    let group = ["Y", "n", "y"];
+    if (!group.contains(key) or claimed == "" or claimed == key) {
+        return None;
+    }
+    return Some(plain_error("mutually exclusive arguments: --twelve --months --year"));
+}
+
+# The --color word, matched without regard to case like util-linux's
+# colormode_from_string.
+func color_mode(word: string): Result[ColorMode, ArgError] {
+    match word.toLowerCase() {
+        "auto" => {
+            return Ok(ColorMode.Auto);
+        },
+        "always" => {
+            return Ok(ColorMode.Always);
+        },
+        "never" => {
+            return Ok(ColorMode.Never);
+        },
+        _ => {
+            return Err(plain_error("unsupported color mode: " + quote(word)));
+        },
+    }
+}
+
+# --reform: this cal knows only the Gregorian calendar, which util-linux
+# calls `gregorian` or `iso`; its default, `1752`, and `julian` change the
+# calendar before September 1752 and are refused with a reason.
+func check_reform(word: string): Option[ArgError] {
+    let lower = word.toLowerCase();
+    if (lower == "gregorian" or lower == "iso") {
+        return None;
+    }
+    if (lower == "1752" or lower == "julian") {
+        return Some(plain_error("--reform " + quote(word) + " is not supported: this cal uses the Gregorian calendar for every year"));
+    }
+    return Some(plain_error("invalid --reform value: " + quote(word)));
+}
+
+# Acts on one option. Returns Ok(true) when parsing should stop because
+# --help or --version was read.
+func apply(edits opts: Options, key: string, value: string, has_value: bool): Result[bool, ArgError] {
+    if (key == "h") {
+        safe { opts.help = true; }
+        return Ok(true);
+    }
+    if (key == "V") {
+        safe { opts.version = true; }
+        return Ok(true);
+    }
+    if (key == "1") {
+        safe { opts.months = 1; }
+    } else if (key == "3") {
+        safe {
+            opts.months = 3;
+            opts.span = true;
+        }
+    } else if (key == "s") {
+        safe { opts.monday = false; }
+    } else if (key == "m") {
+        safe { opts.monday = true; }
+    } else if (key == "j") {
+        safe { opts.julian = true; }
+    } else if (key == "S") {
+        safe { opts.span = true; }
+    } else if (key == "y") {
+        safe { opts.whole_year = true; }
+    } else if (key == "Y") {
+        safe { opts.twelve = true; }
+    } else if (key == "v") {
+        safe { opts.vertical = true; }
+    } else if (key == "n") {
+        let (count, status) = parse_number(value, 0, UINT32_MAX);
+        # util-linux stores the count in an int, so counts past INT32_MAX
+        # would wrap; refuse them instead.
+        if (status != NUMBER_OK or count > INT32_MAX) {
+            let fault = if (status == NUMBER_OK) { OUT_OF_RANGE } else { status };
+            return Err(plain_error(number_message("invalid month argument", value, fault)));
+        }
+        safe { opts.months = count; }
+    } else if (key == "w") {
+        if (has_value) {
+            # util-linux skips one `=`, so `--week==5` is week 5.
+            let text = if (value.startsWith("=")) { value.slice(1) } else { value };
+            let (week, status) = parse_number(text, INT32_MIN, INT32_MAX);
+            if (status != NUMBER_OK) {
+                return Err(plain_error(number_message("invalid week argument", text, status)));
+            }
+            if (week < 1 or week > 54) {
+                return Err(plain_error("illegal week value: use 1-54"));
+            }
+            safe { opts.week = week; }
+        }
+        safe { opts.week_numbers = true; }
+    } else if (key == "color") {
+        var mode = ColorMode.Auto;
+        if (has_value) {
+            let word = if (value.startsWith("=")) { value.slice(1) } else { value };
+            match color_mode(word) {
+                Ok(m) => {
+                    mode = m;
+                },
+                Err(e) => {
+                    return Err(e);
+                },
+            }
+        }
+        safe { opts.color = mode; }
+    } else if (key == "reform") {
+        match check_reform(value) {
+            Some(e) => {
+                return Err(e);
+            },
+            None => {},
+        }
+    } else if (key == "c") {
+        if (value == "auto") {
+            safe { opts.columns = Columns.Auto; }
+        } else {
+            # util-linux's strtosize: digits only, else "Invalid argument".
+            if (!isDigits(value)) {
+                return Err(plain_error(number_message("failed to parse columns", value, NOT_A_NUMBER) + ": Invalid argument"));
+            }
+            let (count, status) = parse_number(value, 0, INT32_MAX);
+            if (status != NUMBER_OK) {
+                return Err(plain_error(number_message("failed to parse columns", value, status)));
+            }
+            safe { opts.columns = Columns.Fixed(count); }
+        }
+    }
+    # "iso" needs nothing: the calendar is always Gregorian.
+    return Ok(false);
+}
+
+pub func parse_args(argv: list[string]): Result[Options, ArgError] {
+    let opts = Options();
     var operands: list[string] = [];
-    var help = false;
-    var version = false;
-    var verbose = false;
-    var shout = false;
-    var greeting = DEFAULT_GREETING;
+    var claimed = "";
     var only_operands = false;
 
+    # Each argument becomes zero or more (key, value, has_value) options,
+    # acted on in order by the loop at the bottom.
     var i = 0;
     while (i < argv.len()) {
         let arg = argv[i];
         i += 1;
-
         if (only_operands or arg == "-" or !arg.startsWith("-")) {
-            if (command.is_empty()) {
-                command = arg;
-            } else {
-                operands.push(arg);
-            }
+            operands.push(arg);
             continue;
         }
         if (arg == "--") {
@@ -47,52 +277,90 @@ pub func parse_args(argv: list[string]): Result[Options, string] {
             continue;
         }
 
-        # Split `--name=value` into its name and inline value.
-        var name = arg;
-        var inline_value: Option[string] = None;
-        if (arg.startsWith("--") and arg.contains("=")) {
-            let parts = arg.split("=");
-            name = parts[0];
-            inline_value = Some(parts.slice(1).join("="));
+        var found: list[(string, string, bool)] = [];
+        if (arg.startsWith("--")) {
+            let body = arg.slice(2);
+            let eq = body.index_of("=");
+            let name = if (eq >= 0) { body.slice(0, eq) } else { body };
+            let matches = find_long(name);
+            if (matches.len() == 0) {
+                return Err(usage_error("unrecognized option " + quote(arg)));
+            }
+            let table = long_options();
+            if (matches.len() > 1) {
+                var names: list[string] = [];
+                for (k in matches) {
+                    names.push(quote("--" + table[k].0));
+                }
+                return Err(usage_error("option " + quote(arg) + " is ambiguous; possibilities: " + names.join(" ")));
+            }
+            let (long, key, kind) = table[matches[0]];
+            if (kind == NO_VALUE and eq >= 0) {
+                return Err(usage_error("option " + quote("--" + long) + " doesn't allow an argument"));
+            }
+            if (eq >= 0) {
+                found.push((key, body.slice(eq + 1), true));
+            } else if (kind == NEEDS_VALUE) {
+                if (i >= argv.len()) {
+                    return Err(usage_error("option " + quote("--" + long) + " requires an argument"));
+                }
+                found.push((key, argv[i], true));
+                i += 1;
+            } else {
+                found.push((key, "", false));
+            }
+        } else {
+            # A cluster of short options; one that takes a value ends it.
+            let letters = arg.chars();
+            var j = 1;
+            while (j < letters.len()) {
+                let letter = letters[j];
+                j += 1;
+                if (SHORT_FLAGS.index_of(letter) >= 0) {
+                    found.push((letter, "", false));
+                } else if (SHORT_WITH_VALUE.index_of(letter) >= 0) {
+                    if (j < letters.len()) {
+                        found.push((letter, arg.slice(j), true));
+                        j = letters.len();
+                    } else if (i < argv.len()) {
+                        found.push((letter, argv[i], true));
+                        i += 1;
+                    } else {
+                        return Err(usage_error("option requires an argument -- " + quote(letter)));
+                    }
+                } else {
+                    return Err(usage_error("invalid option -- " + quote(letter)));
+                }
+            }
         }
 
-        if (name == "-g" or name == "--greeting") {
-            match inline_value {
-                Some(v) => { greeting = v; },
-                None => {
-                    if (i >= argv.len()) {
-                        return Err(i"option '{$ name $}' requires a value");
+        for ((key, value, has_value) in found) {
+            match check_exclusive(key, claimed) {
+                Some(e) => {
+                    return Err(e);
+                },
+                None => {},
+            }
+            if (claimed == "" and (key == "Y" or key == "n" or key == "y")) {
+                claimed = key;
+            }
+            match apply(edits: opts, key, value, has_value) {
+                Ok(stop) => {
+                    if (stop) {
+                        return Ok(opts);
                     }
-                    greeting = argv[i];
-                    i += 1;
+                },
+                Err(e) => {
+                    return Err(e);
                 },
             }
-            continue;
-        }
-
-        if (inline_value.is_some()) {
-            return Err(i"option '{$ name $}' does not take a value");
-        }
-        if (name == "-h" or name == "--help") {
-            help = true;
-        } else if (name == "-V" or name == "--version") {
-            version = true;
-        } else if (name == "-v" or name == "--verbose") {
-            verbose = true;
-        } else if (name == "--shout") {
-            shout = true;
-        } else {
-            return Err(i"unknown option '{$ name $}'");
         }
     }
+    safe { opts.operands = operands; }
+    return Ok(opts);
+}
 
-    return Ok(Options(
-        command = command,
-        operands = operands,
-        help = help,
-        version = version,
-        verbose = verbose,
-        shout = shout,
-        greeting = greeting,
-    ));
+# The line getopt prints after a usage error.
+pub func try_help_line(): string {
+    return "Try '" + APP_NAME + " --help' for more information.";
 }

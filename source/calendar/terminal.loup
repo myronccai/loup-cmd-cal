@@ -1,0 +1,71 @@
+@mode(host.dual)
+
+# What cal needs to know about its standard output: whether it is a
+# terminal, how wide that terminal is, and from that and the --color mode
+# whether to highlight today. The decision itself (colors_enabled) is a
+# pure function; only the two probes below touch the outside world.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` (Stage0) interprets the
+# same code. The self-hosted `loup run` stops at execShell ("unsupported
+# intrinsic"), which is why `make run` uses Stage0. Loup 1.26.0 has no
+# isatty() in its library, so the shell's `test -t 1` answers instead: the
+# shell inherits the program's standard output.
+
+from cli.numbers import (parse_number, NUMBER_OK);
+
+# --color: Default is no --color option at all, which, like util-linux,
+# also respects NO_COLOR; Auto is `--color` or `--color=auto`.
+pub enum ColorMode { Default, Auto, Always, Never }
+
+# The width assumed when the terminal does not say.
+pub const DEFAULT_WIDTH: int = 80;
+
+# Whether standard output is a terminal. Runs `test -t 1` in /bin/sh, which
+# inherits this process's standard output.
+pub func stdout_is_terminal(): bool {
+    return execShell("test -t 1") == 0;
+}
+
+# The terminal's width in columns: $COLUMNS when it holds a positive
+# number, else what `stty size` reports for the controlling terminal, else
+# DEFAULT_WIDTH. util-linux asks the kernel (TIOCGWINSZ) first.
+pub func terminal_width(): int {
+    let (columns, status) = parse_number(env("COLUMNS") ?? "", 1, 100000);
+    if (status == NUMBER_OK) {
+        return columns;
+    }
+    let result = exec(["sh", "-c", "stty size < /dev/tty 2> /dev/null"]);
+    if (result.exit_code == 0) {
+        # "ROWS COLUMNS\n"
+        let words = result.stdout.decode().trim().split(" ");
+        if (words.len() == 2) {
+            let (width, ok) = parse_number(words[1], 1, 100000);
+            if (ok == NUMBER_OK) {
+                return width;
+            }
+        }
+    }
+    return DEFAULT_WIDTH;
+}
+
+# Whether to highlight. `term` is $TERM ("" when unset); `no_color` says
+# whether NO_COLOR is set. util-linux also asks terminfo whether the
+# terminal has colours; a set TERM other than "dumb" stands in for that.
+pub func colors_enabled(mode: ColorMode, tty: bool, term: string, no_color: bool): bool {
+    let capable = tty and term != "" and term != "dumb";
+    match mode {
+        ColorMode.Always => {
+            return true;
+        },
+        ColorMode.Never => {
+            return false;
+        },
+        ColorMode.Auto => {
+            return capable;
+        },
+        ColorMode.Default => {
+            return capable and !no_color;
+        },
+    }
+}

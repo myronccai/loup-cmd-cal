@@ -1,16 +1,24 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE, EXIT_USAGE);
-from cli.args import (Options, parse_args);
-from cli.usage import (usage, version_line);
-from commands.hello import (run_hello);
+# Top level of cal: parse the arguments, report a usage error, handle
+# --help and --version, run the command and turn an unexpected exception
+# into status 1, the only failure status util-linux cal has.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code,
+# and the unit tests call run() directly.
 
-# Parses argv, runs the selected command and returns the exit status.
+from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE);
+from cli.args import (ArgError, parse_args, try_help_line);
+from cli.usage import (usage, version_line);
+from commands.cal import (run_cal);
+
+# Parses argv, runs cal and returns the exit status.
 pub func run(argv: list[string]): int {
     let opts = match parse_args(argv) {
         Ok(parsed) => parsed,
-        Err(msg) => {
-            return usage_error(msg);
+        Err(e) => {
+            return report(e);
         },
     };
 
@@ -22,33 +30,19 @@ pub func run(argv: list[string]): int {
         println(version_line());
         return EXIT_OK;
     }
-    if (opts.verbose) {
-        printErr(i"{$ APP_NAME $}: command '{$ opts.command $}', operands {$ opts.operands $}");
-    }
 
     try {
-        return dispatch(opts);
+        return run_cal(opts);
     } catch (Exception as e) {
-        printErr(i"{$ APP_NAME $}: error: {$ e.message $}");
+        printErr(APP_NAME + ": " + e.message);
         return EXIT_FAILURE;
     }
 }
 
-# Add new commands here and to the help text in cli/usage.loup.
-func dispatch(opts: Options): int {
-    return match opts.command {
-        "hello" => run_hello(opts),
-        "help" => {
-            println(usage());
-            EXIT_OK
-        },
-        "" => usage_error("no command given"),
-        other => usage_error(i"unknown command '{$ other $}'"),
-    };
-}
-
-func usage_error(msg: string): int {
-    printErr(i"{$ APP_NAME $}: {$ msg $}");
-    printErr(i"Try '{$ APP_NAME $} --help' for more information.");
-    return EXIT_USAGE;
+func report(e: ArgError): int {
+    printErr(APP_NAME + ": " + e.message);
+    if (e.try_help) {
+        printErr(try_help_line());
+    }
+    return EXIT_FAILURE;
 }

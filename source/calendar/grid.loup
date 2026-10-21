@@ -1,0 +1,80 @@
+@mode(host.dual)
+
+# One month laid out as cal prints it: six weeks of seven cells, each cell
+# a day number (of the month, or of the year with -j) or blank, and the
+# week number of each of the six lines. Rendering (calendar.layout) only
+# turns these numbers into text.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+
+from core.datetime import (monthLength);
+from calendar.days import (weekday_of, day_of_year, modulo);
+from calendar.weeks import (Numbering, week_number);
+
+# An empty cell or week line.
+pub const BLANK: int = -1;
+# Every month gets six week lines, however many it needs, so that months
+# side by side stay aligned.
+pub const WEEK_LINES: int = 6;
+pub const CELLS: int = 42;
+
+pub class MonthGrid {
+    pub let year: int;
+    pub let month: int;
+    # CELLS entries, week line by week line.
+    pub let days: list[int];
+    # WEEK_LINES entries; all BLANK without week numbers.
+    pub let weeks: list[int];
+
+    new(year: int, month: int, days: list[int], weeks: list[int]) {
+        this.year = year;
+        this.month = month;
+        this.days = days;
+        this.weeks = weeks;
+    }
+}
+
+# Lays out `month` of `year` with weeks starting on `first_day` (Sunday = 0,
+# Monday = 1).
+pub func fill_month(year: int, month: int, first_day: int, julian: bool, numbering: Numbering): MonthGrid {
+    let lead = modulo(weekday_of(1, month, year) - first_day, 7);
+    let first = if (julian) { day_of_year(1, month, year) } else { 1 };
+    let last = first + monthLength(year, month) - 1;
+
+    var days: list[int] = [];
+    var trailing = 0;
+    var next = first;
+    for (var cell = 0; cell < CELLS; cell += 1) {
+        if (cell < lead or next > last) {
+            days.push(BLANK);
+            if (cell >= lead) {
+                trailing += 1;
+            }
+            continue;
+        }
+        days.push(next);
+        next += 1;
+    }
+
+    var weeks: list[int] = [];
+    let used = WEEK_LINES - trailing / 7;
+    let iso = numbering == Numbering.Iso;
+    var number = if (numbering == Numbering.Off) { BLANK } else { week_number(1, month, year, iso) };
+    for (var line = 0; line < WEEK_LINES; line += 1) {
+        if (numbering == Numbering.Off or line >= used) {
+            weeks.push(BLANK);
+            continue;
+        }
+        # Counting on from the first week is right until the count passes
+        # 52: then the year may have turned (ISO week 53 of last year, then
+        # week 1), so ask again for the line's first cell, as util-linux
+        # does.
+        if (number > 52) {
+            number = week_number(days[line * 7], month, year, iso);
+        }
+        weeks.push(number);
+        number += 1;
+    }
+    return MonthGrid(year, month, days, weeks);
+}

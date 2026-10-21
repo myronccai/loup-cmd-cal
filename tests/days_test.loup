@@ -1,0 +1,105 @@
+@mode(host.dual)
+
+# Unit tests for cal's date arithmetic (calendar.days) and week numbers
+# (calendar.weeks): weekdays from Sunday, days of the year, the "%04d"
+# year, month arithmetic across years, and US and ISO 8601 weeks checked
+# against known calendars.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+
+from debug.assert import (expect, expectEq);
+from calendar.days import (modulo, weekday_of, day_of_year, days_in_year, format_year, shift_month, SUNDAY, MONDAY);
+from calendar.weeks import (week_number, week_offset, week_start, month_of_week);
+
+func test_modulo_is_never_negative(): void {
+    expectEq(modulo(-1, 7), 6, "-1 mod 7");
+    expectEq(modulo(-14, 7), 0, "-14 mod 7");
+    expectEq(modulo(9, 7), 2, "9 mod 7");
+}
+
+func test_weekdays_count_from_sunday(): void {
+    expectEq(weekday_of(1, 10, 2026), 4, "2026-10-01 is a Thursday");
+    expectEq(weekday_of(4, 10, 2026), SUNDAY, "2026-10-04 is a Sunday");
+    expectEq(weekday_of(1, 1, 2024), MONDAY, "2024-01-01 is a Monday");
+    expectEq(weekday_of(29, 2, 2000), 2, "2000-02-29 is a Tuesday");
+    expectEq(weekday_of(1, 1, 1), MONDAY, "proleptic Gregorian 0001-01-01");
+}
+
+func test_days_outside_the_month_count_on(): void {
+    expectEq(weekday_of(0, 3, 2026), weekday_of(28, 2, 2026), "day 0 is the last of February");
+    expectEq(weekday_of(32, 1, 2026), weekday_of(1, 2, 2026), "January 32 is February 1");
+    expectEq(weekday_of(-1, 1, 2026), weekday_of(30, 12, 2025), "January -1");
+}
+
+func test_day_of_year(): void {
+    expectEq(day_of_year(1, 1, 2026), 1, "January 1");
+    expectEq(day_of_year(1, 3, 2024), 61, "March 1 of a leap year");
+    expectEq(day_of_year(1, 3, 2026), 60, "March 1");
+    expectEq(day_of_year(31, 12, 2024), 366, "December 31 of a leap year");
+    expectEq(days_in_year(1900), 365, "1900 is not a leap year");
+    expectEq(days_in_year(2000), 366, "2000 is a leap year");
+}
+
+func test_years_print_with_four_digits(): void {
+    expectEq(format_year(2026), "2026", "four digits");
+    expectEq(format_year(7), "0007", "padded");
+    expectEq(format_year(0), "0000", "year 0");
+    expectEq(format_year(-3), "-003", "C's %04d of -3");
+    expectEq(format_year(123456), "123456", "longer years");
+}
+
+func test_shift_month(): void {
+    let (y1, m1) = shift_month(2026, 1, -1);
+    expect(y1 == 2025 and m1 == 12, "back over a new year");
+    let (y2, m2) = shift_month(2026, 11, 3);
+    expect(y2 == 2027 and m2 == 2, "forward over a new year");
+    let (y3, m3) = shift_month(2026, 1, -13);
+    expect(y3 == 2024 and m3 == 12, "thirteen months back");
+    let (y4, m4) = shift_month(1, 1, -2);
+    expect(y4 == 0 and m4 == 11, "below year 1");
+}
+
+func test_us_weeks(): void {
+    expectEq(week_number(1, 1, 2026, false), 1, "January 1 is always in week 1");
+    expectEq(week_number(3, 1, 2026, false), 1, "Saturday of week 1");
+    expectEq(week_number(4, 1, 2026, false), 2, "the next Sunday starts week 2");
+    expectEq(week_number(31, 12, 2026, false), 53, "the end of 2026");
+    expectEq(week_number(31, 12, 2028, false), 54, "a leap year starting on Saturday");
+}
+
+func test_iso_weeks(): void {
+    expectEq(week_number(1, 1, 2021, true), 53, "2021-01-01 is in week 53 of 2020");
+    expectEq(week_number(4, 1, 2021, true), 1, "the first Monday of 2021");
+    expectEq(week_number(29, 12, 2025, true), 1, "2025-12-29 is in week 1 of 2026");
+    expectEq(week_number(28, 12, 2025, true), 52, "the Sunday before");
+    expectEq(week_number(31, 12, 2020, true), 53, "2020 has 53 weeks");
+    expectEq(week_number(20, 10, 2026, true), 43, "an ordinary week");
+    expectEq(week_number(1, 1, 2026, true), 1, "2026 starts on a Thursday");
+}
+
+func test_julian_days_count_from_january(): void {
+    expectEq(week_number(293, 1, 2026, true), week_number(20, 10, 2026, true), "day 293 is October 20");
+}
+
+func test_week_offsets(): void {
+    expectEq(week_offset(0, false), 6, "US, Sunday");
+    expectEq(week_offset(4, true), 9, "ISO, Thursday");
+    expectEq(week_offset(5, true), 3, "ISO, Friday");
+    expectEq(week_offset(6, true), 4, "ISO, Saturday");
+}
+
+func test_week_start(): void {
+    expectEq(week_start(1, 2026, false), 1, "US week 1 starts in 2025: clamped to 1");
+    expectEq(week_start(2, 2026, false), 4, "US week 2 starts on Sunday, January 4");
+    expectEq(week_start(2, 2021, true), 11, "ISO week 2 of 2021 starts on January 11");
+}
+
+func test_month_of_week(): void {
+    expectEq(month_of_week(10, 2026, false).unwrap(), 3, "US week 10 of 2026 starts in March");
+    expectEq(month_of_week(53, 2021, true).unwrap(), 1, "ISO week 53 names the start of 2021");
+    expectEq(month_of_week(54, 2026, false).unwrap(), 1, "US weeks past the end mean January");
+    expectEq(month_of_week(53, 2026, true).unwrap(), 12, "ISO 2026 has 53 weeks");
+    expectEq(month_of_week(54, 2026, true).unwrap_err(), "illegal week value: year 2026 doesn't have week 54", "no ISO week 54");
+}

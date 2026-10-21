@@ -1,0 +1,240 @@
+@mode(host.dual)
+
+# Turning month grids into cal's text, line by line, in util-linux's two
+# layouts: the usual one (a month is a block of weeks, months side by side)
+# and -v (weekdays down the left, the weeks of each month across). Every
+# line is padded to its full width, as util-linux pads it.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+#
+# Structure: Style (widths, first weekday, week numbers, what to
+# highlight) and its factory; text helpers (center, left_align, cells);
+# render_row for the usual layout; render_vertical_row for -v.
+
+from core.string_utils import (padLeft, padRight, repeat);
+from calendar.days import (day_of_year, format_year);
+from calendar.grid import (MonthGrid, WEEK_LINES);
+from calendar.names import (month_name, weekday_label, weekday_headings);
+from calendar.weeks import (Numbering);
+
+# Reverse video on and off: util-linux's default "today" and "weeknumber"
+# colours.
+const REVERSE: string = "\u{1B}[7m";
+const RESET: string = "\u{1B}[0m";
+
+# Everything about how the months of one cal run are drawn.
+pub class Style {
+    pub let julian: bool;
+    pub let first_day: int;
+    pub let numbering: Numbering;
+    # A day cell is day_width characters wide, its separating space
+    # included: 3, or 4 with -j.
+    pub let day_width: int;
+    # The width of one month: seven cells, a week number column if any,
+    # less the leading space of the first cell.
+    pub let week_width: int;
+    pub let gutter: int;
+    # -y: month headers carry no year, a line above them does.
+    pub let year_header: bool;
+    pub let highlight: bool;
+    # The day to highlight: its year, month and day of the year.
+    pub let mark_year: int;
+    pub let mark_month: int;
+    pub let mark_yday: int;
+    # --week=N, highlighted in the week number column.
+    pub let marked_week: int;
+
+    new(julian: bool, first_day: int, numbering: Numbering, gutter: int, year_header: bool,
+        highlight: bool, mark_year: int, mark_month: int, mark_yday: int, marked_week: int) {
+        this.julian = julian;
+        this.first_day = first_day;
+        this.numbering = numbering;
+        this.day_width = if (julian) { 4 } else { 3 };
+        let numbers = if (numbering == Numbering.Off) { 0 } else { 3 };
+        this.week_width = this.day_width * 7 + numbers - 1;
+        this.gutter = gutter;
+        this.year_header = year_header;
+        this.highlight = highlight;
+        this.mark_year = mark_year;
+        this.mark_month = mark_month;
+        this.mark_yday = mark_yday;
+        this.marked_week = marked_week;
+    }
+}
+
+# Other modules build a Style through this factory: a value is best
+# constructed in the module that defines its type.
+pub func make_style(julian: bool, first_day: int, numbering: Numbering, gutter: int,
+                    year_header: bool, highlight: bool, mark_year: int, mark_month: int,
+                    mark_yday: int, marked_week: int): Style {
+    return Style(julian, first_day, numbering, gutter, year_header, highlight,
+                 mark_year, mark_month, mark_yday, marked_week);
+}
+
+# `text` centred in `width` columns, the extra space on the left when the
+# padding is odd (util-linux's mbsalign), or cut to `width`.
+pub func center(text: string, width: int): string {
+    if (text.len() >= width) {
+        return text.slice(0, width);
+    }
+    let padding = width - text.len();
+    let right = padding / 2;
+    return repeat(" ", padding - right) + text + repeat(" ", right);
+}
+
+# `text` padded on the right to `width` columns, or cut to it.
+pub func left_align(text: string, width: int): string {
+    if (text.len() >= width) {
+        return text.slice(0, width);
+    }
+    # A fresh copy: padRight on a string parameter has crashed native
+    # builds (it copies its argument into a var and appends to it).
+    return padRight("" + text, width, " ");
+}
+
+# A number right-aligned in `width` columns; when `marked`, only its digits
+# (two, or three with -j) are in reverse video, as util-linux does it.
+func number_cell(n: int, width: int, marked: bool, julian: bool): string {
+    if (!marked) {
+        return padLeft(str(n), width, " ");
+    }
+    let digits = if (julian) { 3 } else { 2 };
+    return repeat(" ", width - digits) + REVERSE + padLeft(str(n), digits, " ") + RESET;
+}
+
+# The cell number to highlight in `grid` (a day of the month, or of the
+# year with -j), or 0 for none.
+func marked_cell(grid: MonthGrid, style: Style): int {
+    if (!style.highlight or style.mark_yday == 0) {
+        return 0;
+    }
+    if (grid.month != style.mark_month or grid.year != style.mark_year) {
+        return 0;
+    }
+    if (style.julian) {
+        return style.mark_yday;
+    }
+    return style.mark_yday + 1 - day_of_year(1, grid.month, grid.year);
+}
+
+# The header of a month: "October 2026", or "October" under -y.
+func title(grid: MonthGrid, style: Style): string {
+    if (style.year_header) {
+        return month_name(grid.month);
+    }
+    return month_name(grid.month) + " " + format_year(grid.year);
+}
+
+# The usual layout of `grids` side by side: header, weekday names, then
+# six week lines.
+pub func render_row(grids: list[MonthGrid], style: Style): list[string] {
+    let gap = repeat(" ", style.gutter);
+    let numbered = style.numbering != Numbering.Off;
+    let headings = weekday_headings(style.first_day, style.day_width - 1);
+    # The week number column is two digits and a space; with -j the
+    # headings' first label is one character wider, so one space less.
+    let heading_indent = if (style.julian) { style.day_width - 1 } else { style.day_width };
+
+    var titles: list[string] = [];
+    var labels: list[string] = [];
+    for (var k = 0; k < grids.len(); k += 1) {
+        let after = if (k + 1 < grids.len()) { gap } else { "" };
+        titles.push(center(title(grids[k], style), style.week_width) + after);
+        if (numbered) {
+            labels.push(repeat(" ", heading_indent) + headings + after);
+        } else {
+            labels.push(headings + after);
+        }
+    }
+    var lines: list[string] = [titles.join(""), labels.join("")];
+
+    for (var line = 0; line < WEEK_LINES; line += 1) {
+        var parts: list[string] = [];
+        for (var k = 0; k < grids.len(); k += 1) {
+            let grid = grids[k];
+            let mark = marked_cell(grid, style);
+            # The first cell of a week has no leading space unless a week
+            # number stands before it.
+            var width = style.day_width - 1;
+            if (numbered) {
+                let week = grid.weeks[line];
+                if (week > 0) {
+                    let marked = style.highlight and week == style.marked_week;
+                    parts.push(number_cell(week, 2, marked, false));
+                } else {
+                    parts.push("  ");
+                }
+                width = style.day_width;
+            }
+            for (var cell = line * 7; cell < line * 7 + 7; cell += 1) {
+                let day = grid.days[cell];
+                if (day > 0) {
+                    parts.push(number_cell(day, width, day == mark, style.julian));
+                } else {
+                    parts.push(repeat(" ", width));
+                }
+                width = style.day_width;
+            }
+            if (k + 1 < grids.len()) {
+                parts.push(gap);
+            }
+        }
+        lines.push(parts.join(""));
+    }
+    return lines;
+}
+
+# The -v layout of `grids`: a header line, one line per weekday with the
+# month's weeks across, and with -w a line of week numbers under them.
+pub func render_vertical_row(grids: list[MonthGrid], style: Style): list[string] {
+    let gap = repeat(" ", style.gutter);
+    let month_width = style.day_width * WEEK_LINES;
+    let label_width = style.day_width - 1;
+
+    # util-linux follows every title with the gap, the last one too.
+    var header: list[string] = [repeat(" ", style.day_width + 1)];
+    for (grid in grids) {
+        header.push(left_align(title(grid, style), month_width) + gap);
+    }
+    var lines: list[string] = [header.join("")];
+
+    for (var weekday = 0; weekday < 7; weekday += 1) {
+        var parts: list[string] = [left_align(weekday_label(style.first_day + weekday, label_width), label_width)];
+        for (var k = 0; k < grids.len(); k += 1) {
+            let grid = grids[k];
+            let mark = marked_cell(grid, style);
+            for (var week = 0; week < WEEK_LINES; week += 1) {
+                let day = grid.days[weekday + 7 * week];
+                if (day > 0) {
+                    parts.push(number_cell(day, style.day_width, day == mark, style.julian));
+                } else {
+                    parts.push(repeat(" ", style.day_width));
+                }
+            }
+            if (k + 1 < grids.len()) {
+                parts.push(gap);
+            }
+        }
+        lines.push(parts.join(""));
+    }
+
+    if (style.numbering != Numbering.Off) {
+        var parts: list[string] = [repeat(" ", label_width)];
+        for (var k = 0; k < grids.len(); k += 1) {
+            for (week in grids[k].weeks) {
+                if (week > 0) {
+                    let marked = style.highlight and week == style.marked_week;
+                    parts.push(number_cell(week, style.day_width, marked, style.julian));
+                } else {
+                    parts.push(repeat(" ", style.day_width));
+                }
+            }
+            if (k + 1 < grids.len()) {
+                parts.push(gap);
+            }
+        }
+        lines.push(parts.join(""));
+    }
+    return lines;
+}

@@ -1,28 +1,49 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
-from cli.args import (DEFAULT_GREETING);
+# The --help text and the --version line of cal.
+#
+# Runtime: host.dual. Compiled into the native binary build/cal by `make
+# build`; `loup-bootstrap run source/main.loup` interprets the same code.
+
+from appinfo import (APP_NAME, APP_VERSION);
 
 pub func usage(): string {
     let lines = [
-        i"usage: {$ APP_NAME $} [OPTIONS] COMMAND [ARGS...]",
         "",
-        APP_SUMMARY,
+        "Usage:",
+        i" {$ APP_NAME $} [options] [[[day] month] year]",
+        i" {$ APP_NAME $} [options] <timestamp|monthname>",
         "",
-        "Commands:",
-        "  hello [NAME]          Print a greeting (NAME defaults to 'world')",
-        "  help                  Show this help",
+        "Display a calendar, or some part of it.",
+        "Without any arguments, display the current month.",
         "",
         "Options:",
-        i"  -g, --greeting TEXT   Greeting used by 'hello' (default: {$ DEFAULT_GREETING $})",
-        "      --shout           Print the greeting in upper case",
-        "  -v, --verbose         Print diagnostic messages to stderr",
-        "  -h, --help            Show this help and exit",
-        "  -V, --version         Show the version and exit",
+        " -1, --one             show only a single month (default)",
+        " -3, --three           show three months spanning the date",
+        " -n, --months <num>    show num months starting with date's month",
+        " -S, --span            span the date when displaying multiple months",
+        " -s, --sunday          Sunday as first day of week",
+        " -m, --monday          Monday as first day of week",
+        " -j, --julian          use day-of-year for all calendars",
+        "     --reform <val>    Gregorian reform date (gregorian|iso only)",
+        "     --iso             alias for --reform=iso",
+        " -y, --year            show the whole year",
+        " -Y, --twelve          show the next twelve months",
+        " -w, --week[=<num>]    show US or ISO-8601 week numbers",
+        " -v, --vertical        show day vertically instead of line",
+        " -c, --columns <width> amount of columns to use",
+        "     --color[=<when>]  colorize messages (auto, always or never)",
+        "                         colors are enabled by default",
+        "",
+        " -h, --help            display this help",
+        " -V, --version         display version",
+        "",
+        "The calendar is the Gregorian one for every year, also before 1752.",
+        "Today's date is taken in UTC.",
     ];
     return lines.join("\n");
 }
 
 pub func version_line(): string {
-    return i"{$ APP_NAME $} {$ APP_VERSION $}";
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
 }

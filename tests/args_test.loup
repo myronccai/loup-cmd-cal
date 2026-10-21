@@ -1,64 +1,159 @@
 @mode(host.dual)
 
+# Unit tests for cal's command-line parsing (cli.args): short clusters and
+# values, long options and their abbreviations, optional values, operands
+# around options, and getopt's and util-linux's messages.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this
+# file with Stage0 (`loup-bootstrap test --no-parallel`, source/ on
+# LOUPPATH), one test per `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
-from cli.args import (parse_args, DEFAULT_GREETING);
+from cli.args import (Options, ArgError, Columns, parse_args, find_long);
+from calendar.terminal import (ColorMode);
 
-func test_no_arguments(): void {
+func parsed(argv: list[string]): Options {
+    return parse_args(argv).unwrap();
+}
+
+func error_of(argv: list[string]): ArgError {
+    return parse_args(argv).unwrap_err();
+}
+
+func columns_count(opts: Options): int {
+    match opts.columns {
+        Columns.Fixed(n) => {
+            return n;
+        },
+        Columns.Auto => {
+            return -2;
+        },
+        Columns.MaxThree => {
+            return -1;
+        },
+    }
+}
+
+func test_defaults(): void {
     let none: list[string] = [];
-    let opts = parse_args(none).unwrap();
-    expectEq(opts.command, "", "no command");
+    let opts = parsed(none);
+    expectEq(opts.months, 0, "no month count");
+    expect(!opts.span and !opts.monday and !opts.julian, "flags off");
+    expect(!opts.whole_year and !opts.twelve and !opts.vertical, "layout flags off");
+    expect(!opts.week_numbers and opts.week == 0, "no week numbers");
+    expectEq(columns_count(opts), -1, "at most three columns");
+    expect(opts.color == ColorMode.Default, "no --color");
     expectEq(opts.operands.len(), 0, "no operands");
-    expectEq(opts.greeting, DEFAULT_GREETING, "default greeting");
-    expect(!opts.help and !opts.version and !opts.verbose and !opts.shout, "no flags set");
 }
 
-func test_command_and_operands(): void {
-    let opts = parse_args(["hello", "Ann"]).unwrap();
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands.len(), 1, "one operand");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_short_cluster(): void {
+    let opts = parsed(["-3mjw"]);
+    expectEq(opts.months, 3, "-3 shows three months");
+    expect(opts.span, "-3 spans the date");
+    expect(opts.monday and opts.julian and opts.week_numbers, "-m -j -w");
 }
 
-func test_flags_anywhere(): void {
-    let opts = parse_args(["-v", "hello", "--shout", "Ann"]).unwrap();
-    expect(opts.verbose, "verbose");
-    expect(opts.shout, "shout");
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_later_option_wins(): void {
+    expect(!parsed(["-m", "-s"]).monday, "-s after -m");
+    expect(parsed(["-s", "-m"]).monday, "-m after -s");
+    expectEq(parsed(["-3", "-1"]).months, 1, "-1 after -3");
+    expect(parsed(["-3", "-1"]).span, "-1 keeps the span of -3");
 }
 
-func test_help_and_version(): void {
-    expect(parse_args(["--help"]).unwrap().help, "--help");
-    expect(parse_args(["-h"]).unwrap().help, "-h");
-    expect(parse_args(["--version"]).unwrap().version, "--version");
-    expect(parse_args(["-V"]).unwrap().version, "-V");
+func test_values_attached_or_separate(): void {
+    expectEq(parsed(["-n6"]).months, 6, "-n6");
+    expectEq(parsed(["-n", "6"]).months, 6, "-n 6");
+    expectEq(parsed(["-jn", "4"]).months, 4, "value after a cluster");
+    expectEq(parsed(["--months=5"]).months, 5, "--months=5");
+    expectEq(parsed(["--months", "5"]).months, 5, "--months 5");
+    expectEq(columns_count(parsed(["-c2"])), 2, "-c2");
+    expectEq(columns_count(parsed(["--columns", "auto"])), -2, "--columns auto");
 }
 
-func test_value_option_forms(): void {
-    expectEq(parse_args(["-g", "Hi"]).unwrap().greeting, "Hi", "-g VALUE");
-    expectEq(parse_args(["--greeting", "Hi"]).unwrap().greeting, "Hi", "--greeting VALUE");
-    expectEq(parse_args(["--greeting=a=b"]).unwrap().greeting, "a=b", "--greeting=VALUE keeps '='");
+func test_operands_around_options(): void {
+    let opts = parsed(["2", "-m", "2026"]);
+    expect(opts.monday, "option between operands");
+    expectEq(opts.operands.len(), 2, "two operands");
+    expectEq(opts.operands[0], "2", "month");
+    expectEq(opts.operands[1], "2026", "year");
 }
 
 func test_double_dash_ends_options(): void {
-    let opts = parse_args(["hello", "--", "--shout"]).unwrap();
-    expect(!opts.shout, "--shout after -- is an operand");
-    expectEq(opts.operands[0], "--shout", "operand");
+    let opts = parsed(["--", "-3"]);
+    expectEq(opts.months, 0, "-3 after -- is no option");
+    expectEq(opts.operands[0], "-3", "-3 is an operand");
+    expectEq(parsed(["-"]).operands[0], "-", "a lone dash is an operand");
 }
 
-func test_lone_dash_is_operand(): void {
-    let opts = parse_args(["hello", "-"]).unwrap();
-    expectEq(opts.operands[0], "-", "operand");
+func test_long_abbreviations(): void {
+    expect(parsed(["--mond"]).monday, "--mond");
+    expect(parsed(["--jul"]).julian, "--jul");
+    expect(parsed(["--we"]).week_numbers, "--we");
+    expectEq(find_long("months").len(), 1, "an exact name");
+    expectEq(find_long("mon").len(), 2, "monday and months");
+    expectEq(find_long("x").len(), 0, "no option");
 }
 
-func test_unknown_option(): void {
-    expectEq(parse_args(["--nope"]).unwrap_err(), "unknown option '--nope'", "error message");
+func test_week_value_only_after_equals(): void {
+    let opts = parsed(["--week", "2026"]);
+    expect(opts.week_numbers, "--week");
+    expectEq(opts.week, 0, "no week number");
+    expectEq(opts.operands[0], "2026", "the next word stays an operand");
+    expectEq(parsed(["--week=12"]).week, 12, "--week=12");
+    expectEq(parsed(["--week==7"]).week, 7, "one = is skipped");
 }
 
-func test_missing_value(): void {
-    expectEq(parse_args(["-g"]).unwrap_err(), "option '-g' requires a value", "error message");
+func test_color_modes(): void {
+    expect(parsed(["--color"]).color == ColorMode.Auto, "--color");
+    expect(parsed(["--color=always"]).color == ColorMode.Always, "always");
+    expect(parsed(["--color=NEVER"]).color == ColorMode.Never, "case is ignored");
+    expectEq(error_of(["--color=sometimes"]).message, "unsupported color mode: 'sometimes'", "bad mode");
 }
 
-func test_flag_with_value(): void {
-    expectEq(parse_args(["--shout=1"]).unwrap_err(), "option '--shout' does not take a value", "error message");
+func test_reform(): void {
+    expectEq(parsed(["--reform", "gregorian", "2026"]).operands.len(), 1, "gregorian");
+    expectEq(parsed(["--reform=ISO"]).operands.len(), 0, "iso");
+    expectEq(parsed(["--iso"]).operands.len(), 0, "--iso");
+    let julian = error_of(["--reform=julian"]);
+    expectEq(julian.message, "--reform 'julian' is not supported: this cal uses the Gregorian calendar for every year", "julian");
+    expect(!julian.try_help, "no Try line");
+    expectEq(error_of(["--reform", "1752"]).message, "--reform '1752' is not supported: this cal uses the Gregorian calendar for every year", "1752");
+    expectEq(error_of(["--reform=1066"]).message, "invalid --reform value: '1066'", "unknown reform");
+}
+
+func test_help_and_version_stop_parsing(): void {
+    expect(parsed(["--help", "-q"]).help, "--help before an error");
+    expect(parsed(["-V", "--bogus"]).version, "-V before an error");
+    expectEq(error_of(["-q", "--help"]).message, "invalid option -- 'q'", "an error before --help");
+}
+
+func test_getopt_messages(): void {
+    let invalid = error_of(["-x"]);
+    expectEq(invalid.message, "invalid option -- 'x'", "invalid short option");
+    expect(invalid.try_help, "Try line after getopt's messages");
+    expectEq(error_of(["-n"]).message, "option requires an argument -- 'n'", "missing short value");
+    expectEq(error_of(["--bogus"]).message, "unrecognized option '--bogus'", "unknown long option");
+    expectEq(error_of(["--months"]).message, "option '--months' requires an argument", "missing long value");
+    expectEq(error_of(["--one=1"]).message, "option '--one' doesn't allow an argument", "unwanted value");
+    expectEq(error_of(["--mon"]).message, "option '--mon' is ambiguous; possibilities: '--monday' '--months'", "ambiguous");
+    expectEq(error_of(["--col=2"]).message, "option '--col=2' is ambiguous; possibilities: '--color' '--columns'", "ambiguous with a value");
+}
+
+func test_value_messages(): void {
+    expectEq(error_of(["-n", "x"]).message, "invalid month argument: 'x'", "-n x");
+    expectEq(error_of(["-n", "-1"]).message, "invalid month argument: '-1': Numerical result out of range", "-n -1");
+    expectEq(error_of(["-n", "3000000000"]).message, "invalid month argument: '3000000000': Numerical result out of range", "-n past int32");
+    expectEq(error_of(["--week=x"]).message, "invalid week argument: 'x'", "--week=x");
+    expectEq(error_of(["--week=55"]).message, "illegal week value: use 1-54", "--week=55");
+    expectEq(error_of(["-c", "two"]).message, "failed to parse columns: 'two': Invalid argument", "-c two");
+    expect(!error_of(["-c", "two"]).try_help, "no Try line after a bad value");
+}
+
+func test_exclusive_options(): void {
+    let message = "mutually exclusive arguments: --twelve --months --year";
+    expectEq(error_of(["-y", "-n", "2"]).message, message, "-y -n");
+    expectEq(error_of(["-Y", "-y"]).message, message, "-Y -y");
+    expectEq(error_of(["-n2", "-Y"]).message, message, "-n -Y");
+    expect(parsed(["-y", "-y"]).whole_year, "the same option twice");
+    expectEq(parsed(["-n", "2", "--months=4"]).months, 4, "-n twice");
 }
